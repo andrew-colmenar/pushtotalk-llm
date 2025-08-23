@@ -50,7 +50,7 @@ except Exception:
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 DTYPE = "int16"
-HOTKEY = keyboard.Key.f9  # press to toggle start/stop
+HOTKEY = None  # using Option+Shift combo
 SILENCE_PAD_SEC = 0.2  # add a short tail so words aren’t clipped
 # Auto-stop and max duration settings
 AUTO_SILENCE_MS = 800  # stop after this long of silence following speech
@@ -226,10 +226,12 @@ class Speaker:
         self._piper_exec = os.getenv("PIPER_EXEC") or shutil.which("piper")
         self._piper_model = os.getenv("PIPER_MODEL")  # path to .onnx model file
         self._piper_speaker = os.getenv("PIPER_SPEAKER")  # optional speaker id for multispeaker models
-        self._piper_len = os.getenv("PIPER_LENGTH_SCALE") or "1.0"
+        self._piper_len = os.getenv("PIPER_LENGTH_SCALE") or "0.9"  # slightly faster by default
         self._piper_noise = os.getenv("PIPER_NOISE_SCALE") or "0.667"
         # Use Piper if both binary and model are present
         self._use_piper = bool(self._piper_exec and self._piper_model and os.path.exists(self._piper_model))
+        # Current external playback process (for barge-in)
+        self._current_proc: subprocess.Popen | None = None
 
     def say(self, text: str):
         # Queue text to be spoken by the single TTS thread
@@ -250,7 +252,10 @@ class Speaker:
                     if self._say_rate:
                         args += ["-r", self._say_rate]
                     args += [text]
-                    subprocess.run(args, check=False)
+                    proc = subprocess.Popen(args)
+                    self._current_proc = proc
+                    proc.wait()
+                    self._current_proc = None
                 else:
                     self.engine.say(text)
                     self.engine.runAndWait()
@@ -298,7 +303,10 @@ class Speaker:
                     tmp.write(data)
                     tmp.flush()
                     tmp.close()
-                    subprocess.run(["afplay", tmp.name], check=False)
+                    proc = subprocess.Popen(["afplay", tmp.name])
+                    self._current_proc = proc
+                    proc.wait()
+                    self._current_proc = None
                 finally:
                     if tmp is not None:
                         try:
@@ -332,6 +340,34 @@ class Speaker:
     def stop(self):
         # Optional clean shutdown
         self._say_q.put(None)
+
+    def cancel(self):
+        """Stop current speech immediately and clear the queue."""
+        # Clear pending items
+        try:
+            while True:
+                self._say_q.get_nowait()
+        except queue.Empty:
+            pass
+        # Stop external process if any
+        try:
+            if self._current_proc is not None:
+                try:
+                    self._current_proc.terminate()
+                except Exception:
+                    pass
+                try:
+                    self._current_proc.wait(timeout=0.5)
+                except Exception:
+                    pass
+                self._current_proc = None
+        except Exception:
+            pass
+        # Stop pyttsx3
+        try:
+            self.engine.stop()
+        except Exception:
+            pass
 
 # ---------------------------- LLM Logic -------------------------------
 
@@ -368,15 +404,27 @@ class App:
         self.ptt = PushToTalk(on_auto_stop=self._on_auto_stop)
         self.speaker = Speaker()
         self.listener = keyboard.Listener(on_press=self.on_press, on_release=self.on_release)
-        print("\nPush‑to‑Talk ready. Press F9 to start/stop. Ctrl+C to exit.\n")
+        # Track pressed keys for modifiers
+        self._pressed: set = set()
+        self._combo_active = False
+        print("\nPush‑to‑Talk ready. Press Option+Shift to toggle. Ctrl+C to exit.\n")
 
     def run(self):
         with self.listener:
             self.listener.join()
 
     def on_press(self, key):
-        if key == HOTKEY:
+        # Record key press
+        self._pressed.add(key)
+        alt_keys = {keyboard.Key.alt, getattr(keyboard.Key, 'alt_l', keyboard.Key.alt), getattr(keyboard.Key, 'alt_r', keyboard.Key.alt)}
+        shift_keys = {keyboard.Key.shift, getattr(keyboard.Key, 'shift_l', keyboard.Key.shift), getattr(keyboard.Key, 'shift_r', keyboard.Key.shift)}
+        alt_down = any(k in self._pressed for k in alt_keys)
+        shift_down = any(k in self._pressed for k in shift_keys)
+        if alt_down and shift_down and not self._combo_active:
+            self._combo_active = True
             if not self.ptt.is_recording():
+                # Barge-in: stop any speech before listening
+                self.speaker.cancel()
                 self.ptt.start()
                 print("[Recording…]")
             else:
@@ -384,8 +432,15 @@ class App:
                 self._process_recording(rec, reason="manual")
 
     def on_release(self, key):
-        # No-op for toggle behavior
-        pass
+        # Track key release
+        try:
+            self._pressed.remove(key)
+        except KeyError:
+            pass
+        # Reset combo when either modifier is released
+        if key in (keyboard.Key.alt, getattr(keyboard.Key, 'alt_l', keyboard.Key.alt), getattr(keyboard.Key, 'alt_r', keyboard.Key.alt),
+                   keyboard.Key.shift, getattr(keyboard.Key, 'shift_l', keyboard.Key.shift), getattr(keyboard.Key, 'shift_r', keyboard.Key.shift)):
+            self._combo_active = False
 
     def _on_auto_stop(self, rec: Recording, reason: str):
         self._process_recording(rec, reason=reason)
