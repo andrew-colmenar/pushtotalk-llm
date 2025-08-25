@@ -34,6 +34,7 @@ import subprocess
 import shutil
 import tempfile
 import re
+import datetime
 
 import numpy as np
 import sounddevice as sd
@@ -53,12 +54,29 @@ DTYPE = "int16"
 HOTKEY = None  # using Option+Shift combo
 SILENCE_PAD_SEC = 0.2  # add a short tail so words aren’t clipped
 # Auto-stop and max duration settings
-AUTO_SILENCE_MS = 800  # stop after this long of silence following speech
+AUTO_SILENCE_MS = 800  # used only if USE_AUTO_SILENCE=1
+USE_AUTO_SILENCE = os.getenv("USE_AUTO_SILENCE", "0") == "1"
 MAX_UTTERANCE_SEC = int(os.getenv("MAX_UTTERANCE_SEC", "120"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # change to "gpt-5" if you have access
+# Session memory settings
+MEMORY_DIR = os.getenv("MEMORY_DIR", "memories")
+MEMORY_MODEL = os.getenv("OPENAI_MEMORY_MODEL", "gpt-4o")  # summarizer model
+MEMORY_MAX_CHARS = int(os.getenv("MEMORY_MAX_CHARS", "2000"))
+DEBUG = os.getenv("DEBUG", "0") == "1"
+WAKE_ENABLED = os.getenv("ENABLE_WAKE_WORD", "0") == "1"
+WAKE_WORD = os.getenv("WAKE_WORD", "alfred").lower()
+WAKE_COOLDOWN_SEC = float(os.getenv("WAKE_COOLDOWN_SEC", "3.0"))
+VOSK_MODEL_PATH = os.getenv("VOSK_MODEL_PATH")  # required if wake word enabled
+NO_SPEECH_TIMEOUT_SEC = float(os.getenv("NO_SPEECH_TIMEOUT_SEC", "2.5"))
+RMS_MIN = float(os.getenv("RMS_MIN", "200"))
+
+def dbg(msg: str):
+    if DEBUG:
+        ts = time.strftime("%H:%M:%S")
+        print(f"[DBG {ts}] {msg}")
 SYSTEM_PROMPT = (
     "You are a concise voice assistant. Be brief, direct, and helpful. "
-    "If a question is ambiguous, pick the most likely meaning and answer."
+    "Your name is Alfred and refer to me as Bruce."
 )
 
 _openai_client = None
@@ -122,6 +140,13 @@ class PushToTalk:
         with self._lock:
             if self._recording:
                 return
+            dbg("Recording start: muting TTS")
+            # Mute TTS while recording
+            try:
+                # Speaker instance lives in App; we'll unmute in _process_recording
+                pass
+            except Exception:
+                pass
             self._frames.clear()
             self._q = queue.Queue()
             self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE, callback=self._callback)
@@ -136,6 +161,7 @@ class PushToTalk:
             self._calibrate_until = now + 0.5  # 500 ms calibration window for noise floor
             self._noise_rms = 0.0
             self._calib_count = 0
+            dbg("Recording started")
 
     def _drain(self):
         # Pull chunks from queue while recording
@@ -143,7 +169,7 @@ class PushToTalk:
             try:
                 chunk = self._q.get(timeout=0.1)
                 self._frames.append(chunk)
-                # Auto-stop checks
+                # Auto-stop checks (silence detection optional)
                 now = time.time()
                 # Detect speech
                 is_voice = False
@@ -156,29 +182,34 @@ class PushToTalk:
                                 is_voice = True
                                 break
                 else:
-                    # RMS fallback
+                    # RMS fallback (simple, robust)
                     rms = float(np.sqrt(np.mean((chunk.astype(np.float32)) ** 2)))
-                    if now < self._calibrate_until:
-                        # running average for noise floor
-                        self._noise_rms = (self._noise_rms * self._calib_count + rms) / (self._calib_count + 1)
-                        self._calib_count += 1
-                    # Threshold: 3x noise or absolute minimum
-                    threshold = max(self._noise_rms * 3.0 if self._calib_count > 0 else 0.0, 500.0)
-                    is_voice = rms > threshold
+                    dbg(f"RMS={rms:.1f} thr={RMS_MIN:.1f} spoken_once={self._spoken_once}")
+                    is_voice = rms > RMS_MIN
 
                 if is_voice:
                     self._last_voice_time = now
                     self._spoken_once = True
 
                 # Stop on sustained silence after we've detected speech at least once
-                if self._spoken_once and (now - self._last_voice_time) * 1000.0 >= AUTO_SILENCE_MS:
-                    self._auto_stop("silence")
-                    break
+                if USE_AUTO_SILENCE:
+                    if self._spoken_once and (now - self._last_voice_time) * 1000.0 >= AUTO_SILENCE_MS:
+                        dbg("Auto-stop by silence")
+                        self._auto_stop("silence")
+                        break
 
                 # Stop on max duration
                 if (now - self._start_time) >= MAX_UTTERANCE_SEC:
+                    dbg("Auto-stop by max duration")
                     self._auto_stop("max_duration")
                     break
+
+                # Extra guard: if we never detected speech and it's been too long, stop
+                if USE_AUTO_SILENCE:
+                    if not self._spoken_once and (now - self._start_time) >= NO_SPEECH_TIMEOUT_SEC:
+                        dbg("Auto-stop by no speech")
+                        self._auto_stop("no_speech")
+                        break
             except queue.Empty:
                 pass
 
@@ -232,9 +263,14 @@ class Speaker:
         self._use_piper = bool(self._piper_exec and self._piper_model and os.path.exists(self._piper_model))
         # Current external playback process (for barge-in)
         self._current_proc: subprocess.Popen | None = None
+        self._is_speaking = False
+        self._muted = False
 
     def say(self, text: str):
         # Queue text to be spoken by the single TTS thread
+        if self._muted:
+            dbg("TTS muted; dropping utterance")
+            return
         self._say_q.put(text)
 
     def _tts_worker(self):
@@ -243,6 +279,7 @@ class Speaker:
             if text is None:
                 break
             try:
+                text = self._normalize_tts_text(text)
                 if self._use_piper:
                     self._piper_say(text)
                 elif self._use_say:
@@ -252,78 +289,88 @@ class Speaker:
                     if self._say_rate:
                         args += ["-r", self._say_rate]
                     args += [text]
+                    self._is_speaking = True
                     proc = subprocess.Popen(args)
                     self._current_proc = proc
                     proc.wait()
                     self._current_proc = None
+                    self._is_speaking = False
                 else:
-                    self.engine.say(text)
-                    self.engine.runAndWait()
+                    try:
+                        self._is_speaking = True
+                        self.engine.say(text)
+                        self.engine.runAndWait()
+                    finally:
+                        self._is_speaking = False
             except Exception:
                 # Swallow TTS errors to avoid crashing the app loop
                 pass
 
+    def _normalize_tts_text(self, text: str) -> str:
+        # Flatten newlines and excessive whitespace to avoid engine quirks
+        try:
+            return re.sub(r"\s+", " ", text).strip()
+        except Exception:
+            return text
+
     def _piper_say(self, text: str):
-        # Generate WAV via Piper and play for each sentence to ensure complete playback
+        # Generate one WAV via Piper and play atomically so cancel stops all speech
         if not self._piper_exec or not self._piper_model:
             return
-        sentences = self._split_into_sentences(text)
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            args = [
-                self._piper_exec,
-                "--model", self._piper_model,
-                "--length_scale", self._piper_len,
-                "--noise_scale", self._piper_noise,
-                "--output_file", "/dev/stdout",
-                "--sentence-silence", "0.30",
-            ]
-            # Include model config JSON if present for better prosody/params
-            json_path = self._piper_model + ".json"
-            if os.path.exists(json_path):
-                args += ["--config", json_path]
-            if self._piper_speaker:
-                args += ["--speaker", self._piper_speaker]
-            proc = subprocess.run(
-                args,
-                input=(sentence + "\n").encode("utf-8"),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-            data = proc.stdout
-            if not data:
-                continue
-            if sys.platform == "darwin":
-                tmp = None
-                try:
-                    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                    tmp.write(data)
-                    tmp.flush()
-                    tmp.close()
-                    proc = subprocess.Popen(["afplay", tmp.name])
-                    self._current_proc = proc
-                    proc.wait()
-                    self._current_proc = None
-                finally:
-                    if tmp is not None:
-                        try:
-                            os.unlink(tmp.name)
-                        except Exception:
-                            pass
-            else:
-                try:
-                    import soundfile as _sf
-                    import io as _io
-                    wav_io = _io.BytesIO(data)
-                    audio, sr = _sf.read(wav_io, dtype="int16")
-                    if audio.ndim == 1:
-                        audio = audio.reshape(-1, 1)
-                    sd.play(audio, sr, blocking=True)
-                except Exception:
-                    pass
+        args = [
+            self._piper_exec,
+            "--model", self._piper_model,
+            "--length_scale", self._piper_len,
+            "--noise_scale", self._piper_noise,
+            "--output_file", "/dev/stdout",
+        ]
+        json_path = self._piper_model + ".json"
+        if os.path.exists(json_path):
+            args += ["--config", json_path]
+        if self._piper_speaker:
+            args += ["--speaker", self._piper_speaker]
+        proc = subprocess.run(
+            args,
+            input=(text.strip() + "\n").encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        data = proc.stdout
+        if not data:
+            return
+        if sys.platform == "darwin":
+            tmp = None
+            try:
+                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                tmp.write(data)
+                tmp.flush()
+                tmp.close()
+                self._is_speaking = True
+                proc = subprocess.Popen(["afplay", tmp.name])
+                self._current_proc = proc
+                proc.wait()
+                self._current_proc = None
+                self._is_speaking = False
+            finally:
+                if tmp is not None:
+                    try:
+                        os.unlink(tmp.name)
+                    except Exception:
+                        pass
+        else:
+            try:
+                import soundfile as _sf
+                import io as _io
+                wav_io = _io.BytesIO(data)
+                audio, sr = _sf.read(wav_io, dtype="int16")
+                if audio.ndim == 1:
+                    audio = audio.reshape(-1, 1)
+                self._is_speaking = True
+                sd.play(audio, sr, blocking=True)
+                self._is_speaking = False
+            except Exception:
+                pass
 
     def _split_into_sentences(self, text: str) -> list[str]:
         # Split on newlines first, then sentence boundaries.
@@ -368,34 +415,258 @@ class Speaker:
             self.engine.stop()
         except Exception:
             pass
+        self._is_speaking = False
+
+    def is_speaking(self) -> bool:
+        return self._is_speaking
+
+    def set_muted(self, muted: bool):
+        self._muted = muted
+        if muted:
+            # Ensure we stop any current speech
+            self.cancel()
 
 # ---------------------------- LLM Logic -------------------------------
+
+class WakeWordDetectorVosk:
+    """Lightweight always-on wake word detector using Vosk offline ASR.
+
+    Runs a background input stream and triggers callback when WAKE_WORD is heard.
+    Automatically pauses/resumes around active recording to avoid device conflicts.
+    """
+
+    def __init__(self, model_path: str, wake_word: str, on_detect: Callable[[], None]):
+        self.model_path = model_path
+        self.wake_word = wake_word.lower()
+        self.on_detect = on_detect
+        self._stream: sd.InputStream | None = None
+        self._lock = threading.Lock()
+        self._paused = True
+        self._last_trigger = 0.0
+        self._rec = None
+        self._started = False
+
+        try:
+            import vosk  # type: ignore
+            self._vosk = vosk
+        except Exception as e:
+            self._vosk = None
+            dbg(f"Vosk import failed: {e}")
+
+    def start(self):
+        if self._vosk is None:
+            dbg("Wake word disabled: vosk not available")
+            return
+        if not self.model_path or not os.path.exists(self.model_path):
+            dbg("Wake word disabled: VOSK_MODEL_PATH missing or invalid")
+            return
+        with self._lock:
+            if self._started:
+                return
+            try:
+                model = self._vosk.Model(self.model_path)
+                self._rec = self._vosk.KaldiRecognizer(model, SAMPLE_RATE)
+            except Exception as e:
+                dbg(f"Vosk model init failed: {e}")
+                return
+            self._paused = False
+            self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE, callback=self._callback)
+            self._stream.start()
+            self._started = True
+            dbg("Wake detector started")
+
+    def pause(self):
+        with self._lock:
+            self._paused = True
+            if self._stream is not None:
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except Exception:
+                    pass
+                self._stream = None
+            dbg("Wake detector paused")
+
+    def resume(self):
+        with self._lock:
+            if not self._started:
+                return
+            if self._stream is not None:
+                return
+            self._paused = False
+            try:
+                self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE, callback=self._callback)
+                self._stream.start()
+                dbg("Wake detector resumed")
+            except Exception as e:
+                dbg(f"Wake resume failed: {e}")
+
+    def stop(self):
+        with self._lock:
+            self._paused = True
+            if self._stream is not None:
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except Exception:
+                    pass
+                self._stream = None
+            self._started = False
+            dbg("Wake detector stopped")
+
+    def _callback(self, indata, frames, time_info, status):
+        if self._paused or self._rec is None:
+            return
+        try:
+            data = bytes(indata)
+            trig = False
+            # Use partial results for responsiveness
+            if self._rec.AcceptWaveform(data):
+                res = self._rec.Result()
+            else:
+                res = self._rec.PartialResult()
+            text = ""
+            if res:
+                # JSON like {"text": "..."} or {"partial": "..."}
+                if "\"text\":" in res or "\"partial\":" in res:
+                    try:
+                        import json as _json
+                        j = _json.loads(res)
+                        text = (j.get("partial") or j.get("text") or "").lower()
+                    except Exception:
+                        pass
+            if text:
+                if self.wake_word in text:
+                    now = time.time()
+                    if (now - self._last_trigger) >= WAKE_COOLDOWN_SEC:
+                        self._last_trigger = now
+                        dbg(f"Wake word detected in: '{text}'")
+                        # Call outside of audio thread
+                        threading.Thread(target=self.on_detect, daemon=True).start()
+        except Exception:
+            pass
+
+class MemoryManager:
+    """Maintains a concise per-session memory file and updates it via a summarizer model.
+
+    The memory is a short, structured text blob intended to guide future replies.
+    We keep it small to control token costs.
+    """
+
+    def __init__(self, memory_path: str, max_chars: int = MEMORY_MAX_CHARS):
+        self.memory_path = memory_path
+        self.max_chars = max_chars
+        os.makedirs(os.path.dirname(self.memory_path), exist_ok=True)
+        if not os.path.exists(self.memory_path):
+            with open(self.memory_path, "w", encoding="utf-8") as f:
+                f.write("- Recent topics:\n- Preferences:\n- Open tasks:\n")
+
+    def read(self) -> str:
+        try:
+            with open(self.memory_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            return ""
+
+    def write(self, text: str) -> None:
+        # Trim to max_chars (keep tail since it reflects most recent items)
+        trimmed = text.strip()
+        if len(trimmed) > self.max_chars:
+            trimmed = trimmed[-self.max_chars :]
+        with open(self.memory_path, "w", encoding="utf-8") as f:
+            f.write(trimmed)
+
+    def summarize_and_update(self, user_text: str, assistant_text: str) -> None:
+        current = self.read().strip()
+        client = get_openai()
+        # Instruction keeps the memory concise and structured
+        sys_instr = (
+            "You curate a short session memory to improve future answers. "
+            "Keep it under the requested character budget, structured with concise bullets. "
+            "Include only stable facts, user preferences, context, and open tasks. "
+            "Do not restate generic chit-chat. Prefer rewriting/merging over appending."
+        )
+        user_prompt = (
+            f"Existing memory (may be empty):\n{current}\n\n"
+            f"New exchange to incorporate:\nUser: {user_text}\nAssistant: {assistant_text}\n\n"
+            f"Update the memory. Maximum {self.max_chars} characters."
+        )
+        try:
+            resp = client.chat.completions.create(
+                model=MEMORY_MODEL,
+                messages=[
+                    {"role": "system", "content": sys_instr},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=500,
+            )
+            updated = resp.choices[0].message.content or ""
+            self.write(updated)
+            try:
+                print("[Memory summary]\n" + updated + "\n")
+            except Exception:
+                pass
+        except Exception:
+            # Best-effort: on failure, keep previous memory
+            pass
 
 def transcribe_wav_bytes(wav_bytes: bytes) -> str:
     client = get_openai()
     # Use in-memory bytes with a named file-like object
     file_like = io.BytesIO(wav_bytes)
     file_like.name = "speech.wav"
+    dbg(f"Transcribing {len(wav_bytes)} bytes")
     tr = client.audio.transcriptions.create(
         model="whisper-1",
         file=file_like,
         response_format="json",
         temperature=0.0,
     )
+    dbg("Transcription received")
     return tr.text.strip()
 
 
-def chat_llm(user_text: str) -> str:
+def chat_llm(
+    user_text: str,
+    memory_text: str | None = None,
+    last_user_text: str | None = None,
+    last_assistant_text: str | None = None,
+) -> str:
     client = get_openai()
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+    ]
+    if memory_text:
+        snippet = memory_text.strip()
+        if len(snippet) > MEMORY_MAX_CHARS:
+            snippet = snippet[-MEMORY_MAX_CHARS :]
+        dbg(f"Injecting memory ({len(snippet)} chars)")
+        messages.append({
+            "role": "system",
+            "content": (
+                "Session memory (use only if relevant to the question):\n" + snippet
+            ),
+        })
+    if last_user_text and last_assistant_text:
+        # Provide the immediately previous exchange as optional context.
+        messages.append({
+            "role": "system",
+            "content": (
+                "Previous exchange (use only if relevant; ignore if off-topic):\n"
+                f"User: {last_user_text}\n"
+                f"Assistant: {last_assistant_text}"
+            ),
+        })
+    dbg(f"LLM user text len={len(user_text)}")
+    messages.append({"role": "user", "content": user_text})
     resp = client.chat.completions.create(
         model=MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_text},
-        ],
+        messages=messages,
         temperature=0.4,
         max_tokens=300,
     )
+    dbg("LLM reply received")
     return resp.choices[0].message.content.strip()
 
 # --------------------------- App wiring -------------------------------
@@ -408,8 +679,27 @@ class App:
         self._pressed: set = set()
         self._combo_active = False
         print("\nPush‑to‑Talk ready. Press Option+Shift to toggle. Ctrl+C to exit.\n")
+        # Set up per-session memory file
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        mem_dir = MEMORY_DIR
+        os.makedirs(mem_dir, exist_ok=True)
+        self.memory_path = os.path.join(mem_dir, f"session-{ts}.md")
+        self.memory = MemoryManager(self.memory_path, max_chars=MEMORY_MAX_CHARS)
+        # Track the most recent single-turn exchange to optionally include next time
+        self._last_user_text: str | None = None
+        self._last_assistant_text: str | None = None
+        # Wake word detector (optional)
+        self.wake: WakeWordDetectorVosk | None = None
+        if WAKE_ENABLED:
+            self.wake = WakeWordDetectorVosk(
+                model_path=VOSK_MODEL_PATH or "",
+                wake_word=WAKE_WORD,
+                on_detect=self._on_wake_detect,
+            )
 
     def run(self):
+        if self.wake is not None:
+            self.wake.start()
         with self.listener:
             self.listener.join()
 
@@ -422,9 +712,22 @@ class App:
         shift_down = any(k in self._pressed for k in shift_keys)
         if alt_down and shift_down and not self._combo_active:
             self._combo_active = True
-            if not self.ptt.is_recording():
-                # Barge-in: stop any speech before listening
+            # If currently speaking, cancel speech and start recording immediately
+            if self.speaker.is_speaking():
                 self.speaker.cancel()
+                dbg("Hotkey cancel speech -> start recording")
+                if self.wake is not None:
+                    self.wake.pause()
+                # Mute TTS during recording
+                self.speaker.set_muted(True)
+                self.ptt.start()
+                print("[Recording…]")
+                return
+            # Otherwise toggle record/stop as usual
+            if not self.ptt.is_recording():
+                if self.wake is not None:
+                    self.wake.pause()
+                self.speaker.set_muted(True)
                 self.ptt.start()
                 print("[Recording…]")
             else:
@@ -447,22 +750,61 @@ class App:
 
     def _process_recording(self, rec: Recording, reason: str):
         print("[Transcribing…]")
+        dbg(f"Process recording reason={reason} frames={len(rec.frames)}")
         try:
             wav_bytes = rec.to_wav_bytes()
             text = transcribe_wav_bytes(wav_bytes)
             print(f"You: {text}")
+            dbg(f"Transcript len={len(text)}")
             if not text:
                 self.speaker.say("I didn't catch that.")
                 return
             print("[Thinking…]")
-            reply = chat_llm(text)
+            mem_text = self.memory.read()
+            dbg(f"Memory read len={len(mem_text)} from {self.memory_path}")
+            reply = chat_llm(
+                text,
+                memory_text=mem_text,
+                last_user_text=self._last_user_text,
+                last_assistant_text=self._last_assistant_text,
+            )
             print(f"Assistant: {reply}")
+            dbg(f"Reply len={len(reply)}")
+            # Unmute before queuing speech to avoid dropping
+            self.speaker.set_muted(False)
             self.speaker.say(reply)
+            # Store last exchange for next turn context (optional usage by the model)
+            self._last_user_text = text
+            self._last_assistant_text = reply
+            # Update memory (best-effort; do not block UI)
+            threading.Thread(target=self.memory.summarize_and_update, args=(text, reply), daemon=True).start()
+            # Resume wake detector after speaking queues
+            if self.wake is not None:
+                # Give a brief delay to avoid self-trigger on TTS tail
+                def _resume():
+                    time.sleep(0.4)
+                    self.wake.resume()
+                threading.Thread(target=_resume, daemon=True).start()
         except KeyboardInterrupt:
             raise
         except Exception as e:
             print(f"Error: {e}")
+            dbg(f"Error detail: {e}")
             self.speaker.say("There was an error.")
+            self.speaker.set_muted(False)
+
+    def _on_wake_detect(self):
+        dbg("Wake callback fired")
+        # If already recording, ignore
+        if self.ptt.is_recording():
+            return
+        # Stop any speech and start recording
+        self.speaker.cancel()
+        if self.wake is not None:
+            self.wake.pause()
+        self.speaker.set_muted(True)
+        self.ptt.start()
+        print("[Recording…]")
 
 if __name__ == "__main__":
     # Sanity check for API key

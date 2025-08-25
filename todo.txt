@@ -1,0 +1,2 @@
+Can I add something whenever I hit the hot key it also takes a picture of my screen whatever state it is
+ when I hit the key and passes it as input to the model?
