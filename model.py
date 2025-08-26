@@ -75,7 +75,7 @@ def dbg(msg: str):
         ts = time.strftime("%H:%M:%S")
         print(f"[DBG {ts}] {msg}")
 SYSTEM_PROMPT = (
-    "You are a concise voice assistant. Be brief, direct, and helpful. "
+    "You are a concise voice assistant. Be direct, and helpful. "
     "Your name is Alfred and refer to me as Bruce."
 )
 
