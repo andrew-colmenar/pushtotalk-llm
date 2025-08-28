@@ -1,8 +1,9 @@
 """
 Super‑simple background push‑to‑talk for LLM replies.
 
-Hold F9 to record; release to send audio to Whisper for STT,
-pipe transcript to an LLM, and speak the reply locally.
+Tap the hotkey to start recording; release is not required. It auto‑stops
+on silence and sends audio to Whisper for STT, then pipes the transcript
+to an LLM and speaks the reply locally.
 
 Tested on macOS/Windows/Linux (needs microphone permissions on macOS).
 
@@ -51,11 +52,10 @@ except Exception:
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 DTYPE = "int16"
-HOTKEY = None  # using Option+Shift combo
 SILENCE_PAD_SEC = 0.2  # add a short tail so words aren’t clipped
 # Auto-stop and max duration settings
 AUTO_SILENCE_MS = 800  # used only if USE_AUTO_SILENCE=1
-USE_AUTO_SILENCE = os.getenv("USE_AUTO_SILENCE", "0") == "1"
+USE_AUTO_SILENCE = os.getenv("USE_AUTO_SILENCE", "1") == "1"
 MAX_UTTERANCE_SEC = int(os.getenv("MAX_UTTERANCE_SEC", "120"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # change to "gpt-5" if you have access
 # Session memory settings
@@ -140,13 +140,7 @@ class PushToTalk:
         with self._lock:
             if self._recording:
                 return
-            dbg("Recording start: muting TTS")
-            # Mute TTS while recording
-            try:
-                # Speaker instance lives in App; we'll unmute in _process_recording
-                pass
-            except Exception:
-                pass
+            dbg("Recording start")
             self._frames.clear()
             self._q = queue.Queue()
             self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE, callback=self._callback)
@@ -248,8 +242,8 @@ class Speaker:
         self._say_q: queue.Queue[str | None] = queue.Queue()
         self._tts_thread = threading.Thread(target=self._tts_worker, daemon=True)
         self._tts_thread.start()
-        # Prefer macOS 'say' for robustness unless disabled
-        self._use_say = (sys.platform == "darwin" and os.getenv("USE_MAC_SAY", "1") != "0")
+        # Prefer pyttsx3 by default; macOS 'say' opt-in via USE_MAC_SAY=1
+        self._use_say = (sys.platform == "darwin" and os.getenv("USE_MAC_SAY", "0") != "0")
         self._say_voice = os.getenv("TTS_VOICE")  # e.g., Samantha, Alex
         # pyttsx3 uses words per minute; macOS say uses -r wpm
         self._say_rate = os.getenv("TTS_RATE")  # e.g., 190
@@ -265,46 +259,110 @@ class Speaker:
         self._current_proc: subprocess.Popen | None = None
         self._is_speaking = False
         self._muted = False
+        self._utterance_active = False
+        dbg(f"TTS backend: {'piper' if self._use_piper else ('say' if self._use_say else 'pyttsx3')}")
 
     def say(self, text: str):
-        # Queue text to be spoken by the single TTS thread
+        # Queue text chunks to be spoken by the single TTS thread
         if self._muted:
             dbg("TTS muted; dropping utterance")
             return
-        self._say_q.put(text)
+        parts = self._prepare_utterance_parts(text)
+        try:
+            dbg(f"TTS enqueue parts={len(parts)}")
+        except Exception:
+            pass
+        for part in parts:
+            self._say_q.put(part)
 
     def _tts_worker(self):
         while True:
             text = self._say_q.get()
             if text is None:
                 break
+            self._utterance_active = True
             try:
                 text = self._normalize_tts_text(text)
                 if self._use_piper:
+                    # Piper handles long inputs robustly; keep atomic playback
                     self._piper_say(text)
                 elif self._use_say:
-                    args = ["say"]
-                    if self._say_voice:
-                        args += ["-v", self._say_voice]
-                    if self._say_rate:
-                        args += ["-r", self._say_rate]
-                    args += [text]
-                    self._is_speaking = True
-                    proc = subprocess.Popen(args)
-                    self._current_proc = proc
-                    proc.wait()
-                    self._current_proc = None
-                    self._is_speaking = False
+                    if not self._muted:
+                        dbg("TTS say (file)-> start")
+                        self._say_via_file_and_afplay(text)
+                        dbg("TTS say (file)-> done")
                 else:
-                    try:
+                    if not self._muted:
+                        dbg("TTS pyttsx3 -> start")
                         self._is_speaking = True
                         self.engine.say(text)
                         self.engine.runAndWait()
-                    finally:
                         self._is_speaking = False
+                        dbg("TTS pyttsx3 -> done")
             except Exception:
                 # Swallow TTS errors to avoid crashing the app loop
                 pass
+            finally:
+                self._utterance_active = False
+
+    def _prepare_utterance_parts(self, text: str) -> list[str]:
+        # 1) normalize whitespace
+        t = self._normalize_tts_text(text)
+        # 2) sanitize common unicode that breaks some voices
+        try:
+            t = (
+                t.replace("\u2014", "-")   # em dash —
+                 .replace("\u2013", "-")  # en dash –
+                 .replace("\u2026", "...")# ellipsis …
+                 .replace("\u2019", "'")  # smart apostrophe ’
+                 .replace("\u201c", '"').replace("\u201d", '"')  # smart quotes
+            )
+        except Exception:
+            pass
+        # Remove markdown fences that some engines choke on
+        t = t.replace("```", " ").replace("`", "")
+        # 3) split into sentences (fallback to whole text)
+        parts = self._split_into_sentences(t)
+        # Do NOT merge sentences; speak sentence-by-sentence to avoid engine truncation
+        return parts if parts else [t]
+
+    def _say_via_file_and_afplay(self, text: str):
+        """Generate TTS with macOS 'say' into a temp file and play via afplay atomically."""
+        tmp = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(suffix=".aiff", delete=False)
+            tmp_path = tmp.name
+            tmp.close()
+            args = ["say", "-o", tmp_path]
+            if self._say_voice:
+                args += ["-v", self._say_voice]
+            if self._say_rate:
+                args += ["-r", self._say_rate]
+            args += [text]
+            # Synthesize to file
+            subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Play the file
+            self._is_speaking = True
+            proc = subprocess.Popen(["afplay", tmp_path])
+            self._current_proc = proc
+            proc.wait()
+            self._current_proc = None
+            self._is_speaking = False
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
+
+    def wait_until_idle(self, timeout: float | None = None) -> bool:
+        """Block until TTS queue is empty and not speaking. Returns True if idle, False on timeout."""
+        start = time.time()
+        while self._utterance_active or self._is_speaking or not self._say_q.empty():
+            if timeout is not None and (time.time() - start) >= timeout:
+                return False
+            time.sleep(0.05)
+        return True
 
     def _normalize_tts_text(self, text: str) -> str:
         # Flatten newlines and excessive whitespace to avoid engine quirks
@@ -422,6 +480,7 @@ class Speaker:
 
     def set_muted(self, muted: bool):
         self._muted = muted
+        dbg(f"TTS muted={muted}")
         if muted:
             # Ensure we stop any current speech
             self.cancel()
@@ -678,7 +737,7 @@ class App:
         # Track pressed keys for modifiers
         self._pressed: set = set()
         self._combo_active = False
-        print("\nPush‑to‑Talk ready. Press Option+Shift to toggle. Ctrl+C to exit.\n")
+        print("\nPush‑to‑Talk ready. Tap Option+Shift to start. Auto‑stops on silence. Tap again to stop. Ctrl+C to exit.\n")
         # Set up per-session memory file
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         mem_dir = MEMORY_DIR
@@ -772,19 +831,21 @@ class App:
             dbg(f"Reply len={len(reply)}")
             # Unmute before queuing speech to avoid dropping
             self.speaker.set_muted(False)
+            # Pause wake detector for entire TTS window to prevent device contention
+            if self.wake is not None:
+                self.wake.pause()
             self.speaker.say(reply)
+            # Wait for TTS to finish (with a sane cap) before resuming wake
+            self.speaker.wait_until_idle(timeout=60.0)
+            if self.wake is not None:
+                # Brief delay to avoid self-triggering on the tail
+                time.sleep(0.2)
+                self.wake.resume()
             # Store last exchange for next turn context (optional usage by the model)
             self._last_user_text = text
             self._last_assistant_text = reply
             # Update memory (best-effort; do not block UI)
             threading.Thread(target=self.memory.summarize_and_update, args=(text, reply), daemon=True).start()
-            # Resume wake detector after speaking queues
-            if self.wake is not None:
-                # Give a brief delay to avoid self-trigger on TTS tail
-                def _resume():
-                    time.sleep(0.4)
-                    self.wake.resume()
-                threading.Thread(target=_resume, daemon=True).start()
         except KeyboardInterrupt:
             raise
         except Exception as e:
