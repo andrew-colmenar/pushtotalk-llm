@@ -75,8 +75,7 @@ def dbg(msg: str):
         ts = time.strftime("%H:%M:%S")
         print(f"[DBG {ts}] {msg}")
 SYSTEM_PROMPT = (
-    "You are a concise voice assistant. Be direct, and helpful. "
-    "Your name is Alfred and refer to me as Bruce."
+    "You are a voice assistant. Be direct, and helpful. Prepare response in a readable format for a TTS engine."
 )
 
 _openai_client = None
