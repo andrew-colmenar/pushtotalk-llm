@@ -18,10 +18,10 @@ Example format:
 Decide what is needed to answer the user:
 
 - needs_websearch = true only if fresh/verified info is likely required (news, prices, schedules, release dates, "today/now").
-- needs_image = true if a screenshot/visual might help OR if the message references the screen/code/UI ("this", "here", "above", "on my screen", "what should I put here?") OR if it's ambiguous what they're pointing at.
-- needs_memory = true if the message has any chance of depending on prior turns OR is very short/elliptical ("yes", "no", "that", "same", "continue", "again") OR if meaning is unclear without context.
+- needs_image = Default to true, only set to false if it adds no value and there is no ambiguity. true if a screenshot/visual might help or if the message references the screen/code/UI ("this", "here", "above", "on my screen", "what should I put here?") OR if it's unclear what they're referencing.
+- needs_memory = true if the message has any chance of depending on prior turns OR is very short/elliptical ("yes", "no", "that", "same", "continue", "again") OR if meaning is unclear without context. Default to true, only set to false if you are confident it adds no value and there is no ambiguity.
 
-Be lenient: if uncertain, set needs_image/needs_memory to true.
+Be lenient: for any uncertainty set needs_image/needs_memory to true.
 User question: {question}
 """
     resp = client.responses.create(
