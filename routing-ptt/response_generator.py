@@ -10,9 +10,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 def execute_plan(
     question: str,
     plan: dict,
-    memory_text: str = "",
-    image_b64: str = "",
-
+    memory_text: str = ""
 ) -> str:
     """
     Given the question and the plan dict from plan_tools(),
@@ -56,3 +54,24 @@ def execute_plan(
 #     answer = execute_plan(q, plan, memory_text="user's name is Batman", image_b64="")
 #     #print("Answer:", answer)
 
+if __name__ == "__main__":
+    from plan_router import plan_tools
+
+
+    q = "What time does this game start?"
+
+    plan = plan_tools(q)
+    print("Plan:", json.dumps(plan, indent=2))
+
+    # capture screenshot only if needed
+    # image_b64 = ""
+    # if plan.get("needs_image"):
+    #     from screenshot import capture_fullscreen_b64
+    #     image_b64 = capture_fullscreen_b64()
+
+    answer = execute_plan(
+        question=q,
+        plan=plan,
+        memory_text="User's name is Batman"
+            )
+    print("\nAnswer:\n", answer)
