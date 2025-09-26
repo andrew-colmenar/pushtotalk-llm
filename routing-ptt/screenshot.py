@@ -3,7 +3,7 @@ import io, base64
 import mss, mss.tools
 from PIL import Image
 
-def capture_fullscreen_b64(max_width: int = 1600, quality: int = 85) -> str:
+def capture_fullscreen_b64(max_width: int = 16000, quality: int = 85) -> str:
     """
     Grabs the primary monitor, optionally downsizes to save tokens,
     and returns a base64-encoded PNG string.
