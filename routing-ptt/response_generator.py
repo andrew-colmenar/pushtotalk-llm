@@ -26,8 +26,12 @@ def execute_plan(
         content.append({"type": "input_text", "text": f"[MEMORY]\n{memory_text}"})
 
     if plan.get("needs_image"):
-        image_b64 = capture_fullscreen_b64()  # capture once, pass to model
-        content.append({"type": "input_image", "image_data": image_b64, "mime_type": "image/png"})
+        b64 = capture_fullscreen_b64()
+        data_url = f"data:image/png;base64,{b64}"
+        content.append({
+            "type": "input_image",
+            "image_url": data_url,          
+        })
 
     tools = []
     if plan.get("needs_websearch"):
@@ -58,7 +62,7 @@ if __name__ == "__main__":
     from plan_router import plan_tools
 
 
-    q = "What time does this game start?"
+    q = "In my code what is my plan print statement doing?"
 
     plan = plan_tools(q)
     print("Plan:", json.dumps(plan, indent=2))
