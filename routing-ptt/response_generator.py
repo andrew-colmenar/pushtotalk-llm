@@ -92,7 +92,7 @@ if __name__ == "__main__":
     # simple session id; swap for per-user/per-hotkey if you want
     SESSION_ID = "default"
 
-    q = "In my code what is my plan print statement doing?"
+    q = "In my code what is my print statement doing?"
     plan = plan_tools(q)
     print("Plan:", json.dumps(plan, indent=2))
 

@@ -20,12 +20,12 @@ class SessionMemory:
     def add_turn(self, role: str, text: str) -> None:
         self.turns.append(Turn(role, text))
 
-    def compact_text(self, max_chars: int = 800) -> str:
+    def compact_text(self, max_chars: int = 8000) -> str:
         parts: List[str] = []
         if self.summary:
             parts.append(f"[SUMMARY] {self.summary}")
         for t in list(self.turns)[-8:]:  # last ~4 exchanges
-            prefix = "U:" if t.role == "user" else "A:"
+            prefix = "User:" if t.role == "user" else "Assistant:"
             parts.append(f"{prefix} {t.text.strip()}")
         out = "\n".join(parts)
         return (out[:max_chars-3] + "...") if len(out) > max_chars else out
@@ -58,7 +58,7 @@ class MemoryStore:
     def add_turn(self, session_id: str, role: str, text: str) -> None:
         self.get(session_id).add_turn(role, text)
 
-    def get_compact_memory(self, session_id: str, max_chars: int = 800) -> str:
+    def get_compact_memory(self, session_id: str, max_chars: int = 8000) -> str:
         return self.get(session_id).compact_text(max_chars=max_chars)
 
     # convenience wrapper
@@ -91,9 +91,9 @@ def summarize_fn(old_turns: List[Turn], existing_summary: str) -> str:
             "content": [{
                 "type": "input_text",
                 "text": (
-                    "Summarize the following conversation history into ONE concise sentence "
+                    "Summarize following conversation history into concise sentence "
                     "(<= 30 words), capturing task/topic, decisions, and any specific goals. "
-                    "Avoid fluff.\n\n" + text
+                    "Or add new information to existing summary.\n\n" + text
                 )
             }]
         }],
