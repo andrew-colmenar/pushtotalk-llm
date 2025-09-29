@@ -1,11 +1,17 @@
+from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, List
-
+from typing import Deque, List, Dict
 import os
-from typing import List
 from openai import OpenAI
 
+# Config: last N verbatim, previous M summarized
+LAST_N = 4
+WINDOW_M = 6
+MAX_TURNS_BUFFER = 200  # local ring buffer; not all of this is sent to the model
+_MAX_CHARS = 8000
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 @dataclass
 class Turn:
@@ -14,41 +20,110 @@ class Turn:
 
 @dataclass
 class SessionMemory:
-    turns: Deque[Turn] = field(default_factory=lambda: deque(maxlen=12))  # recent turns
-    summary: str = ""  # rolling 1–2 line summary
+    turns: Deque[Turn] = field(default_factory=lambda: deque(maxlen=MAX_TURNS_BUFFER))
+    # Single plain-text block we pass straight into the final model:
+    # 
+    # MEMORIES:
+    # - bullet...
+    # - bullet...
+    #
+    # SUMMARY:
+    # one concise sentence...
+    memory_block: str = ""  # produced by recompute_memory_block()
 
     def add_turn(self, role: str, text: str) -> None:
         self.turns.append(Turn(role, text))
 
-    def compact_text(self, max_chars: int = 8000) -> str:
-        parts: List[str] = []
-        if self.summary:
-            parts.append(f"[SUMMARY] {self.summary}")
-        for t in list(self.turns)[-8:]:  # last ~4 exchanges
-            prefix = "User:" if t.role == "user" else "Assistant:"
-            parts.append(f"{prefix} {t.text.strip()}")
-        out = "\n".join(parts)
-        return (out[:max_chars-3] + "...") if len(out) > max_chars else out
+    def _window_slice(self) -> List[Turn]:
+        """The M turns immediately before the last N: [-(N+M) : -N]."""
+        total = len(self.turns)
+        if total < LAST_N + 1:
+            return []
+        start = max(0, total - (LAST_N + WINDOW_M))
+        end = max(0, total - LAST_N)
+        return list(self.turns)[start:end]
 
-    # NEW: condense older turns into a one-liner using a provided summarize() fn
-    def update_summary(self, summarize_fn, keep_last: int = 6) -> None:
+    def recompute_memory_block(self) -> None:
         """
-        summarize_fn: callable(list_of_Turn, existing_summary:str) -> str
-        keep_last: how many most-recent turns to retain verbatim after summarizing
+        Ask the model to produce a single plain-text block:
+
+        MEMORIES:
+        - <0–5 durable bullets for long-term use, strictly curated>
+
+        SUMMARY:
+        <ONE concise sentence (<= 30 words) contextualizing ONLY the window (M turns before last N)>
+
+        We store that whole block (no parsing) in self.memory_block.
         """
-        if len(self.turns) <= keep_last:
-            return  # nothing to condense
-        old = list(self.turns)[:-keep_last]       # older context
-        self.summary = summarize_fn(old, self.summary).strip()
-        # drop old, keep last K
-        recent = list(self.turns)[-keep_last:]
-        self.turns.clear()
-        for t in recent:
-            self.turns.append(t)
+        window = self._window_slice()
+        if not window:
+            self.memory_block = ""
+            return
+
+        # Build the window text
+        lines = []
+        for t in window:
+            who = "User" if t.role == "user" else "Assistant"
+            lines.append(f"{who}: {t.text.strip()}")
+        block = "\n".join(lines)
+
+        prompt = f"""You are maintaining conversation memory.
+
+Produce a plain text response in this structure:
+
+MEMORIES:
+- (durable facts/rules/preferences explicitly stated or vital long term items)
+- (each bullet concise and precise)
+
+SUMMARY:
+<summary that contextualizes the block so we know the general direction/idea AND key steps/decisions>
+        
+WINDOW TO SUMMARIZE:
+{block}
+""".strip()
+
+        resp = client.responses.create(
+            model="gpt-4.1-mini",
+            input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+            temperature=0.2,
+        )
+
+        text = (resp.output_text or "").strip()
+        # Tolerate accidental code fences
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+            # if it starts with a language tag, drop the first line
+            if "\n" in text:
+                first, rest = text.split("\n", 1)
+                if first.lower() in ("json", "txt", "text"):
+                    text = rest.strip()
+
+        self.memory_block = text
+
+    def compact_text(self, max_chars: int = _MAX_CHARS) -> str:
+        """
+        What we send to the final model as [MEMORY]:
+        - memory_block (MEMORIES + SUMMARY)
+        - last N turns verbatim
+        """
+        parts: List[str] = []
+        if self.memory_block:
+            parts.append(self.memory_block.strip())
+
+        recent = list(self.turns)[-LAST_N:]
+        if recent:
+            parts.append("")  # blank line before verbatim
+            for t in recent:
+                prefix = "User:" if t.role == "user" else "Assistant:"
+                parts.append(f"{prefix} {t.text.strip()}")
+
+        out = "\n".join(parts).strip()
+        return (out[: max_chars - 3] + "...") if len(out) > max_chars else out
+
 
 class MemoryStore:
     def __init__(self):
-        self._sessions: dict[str, SessionMemory] = {}
+        self._sessions: Dict[str, SessionMemory] = {}
 
     def get(self, session_id: str) -> SessionMemory:
         if session_id not in self._sessions:
@@ -58,46 +133,9 @@ class MemoryStore:
     def add_turn(self, session_id: str, role: str, text: str) -> None:
         self.get(session_id).add_turn(role, text)
 
-    def get_compact_memory(self, session_id: str, max_chars: int = 8000) -> str:
+    def recompute_summary(self, session_id: str) -> None:
+        """Recompute the plain-text memory block (MEMORIES + SUMMARY)."""
+        self.get(session_id).recompute_memory_block()
+
+    def get_compact_memory(self, session_id: str, max_chars: int = _MAX_CHARS) -> str:
         return self.get(session_id).compact_text(max_chars=max_chars)
-
-    # convenience wrapper
-    def maybe_summarize(self, session_id: str, summarize_fn, keep_last: int = 6, threshold: int = 10) -> None:
-        s = self.get(session_id)
-        if len(s.turns) >= threshold:
-            s.update_summary(summarize_fn, keep_last=keep_last)
-
-
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-def summarize_fn(old_turns: List[Turn], existing_summary: str) -> str:
-    """
-    Returns a single short line that captures the essence of old_turns + existing_summary.
-    """
-    # Build a tiny text payload (keep it cheap)
-    lines = []
-    if existing_summary:
-        lines.append(f"Existing summary: {existing_summary}")
-    for t in old_turns[-12:]:  # cap to avoid long prompts
-        who = "User" if t.role == "user" else "Assistant"
-        lines.append(f"{who}: {t.text.strip()}")
-    text = "\n".join(lines)
-
-    resp = client.responses.create(
-        model="gpt-4.1-mini",
-        input=[{
-            "role": "user",
-            "content": [{
-                "type": "input_text",
-                "text": (
-                    "Summarize following conversation history into concise sentence "
-                    "(<= 30 words), capturing task/topic, decisions, and any specific goals. "
-                    "Or add new information to existing summary.\n\n" + text
-                )
-            }]
-        }],
-        temperature=0.2,
-    )
-    return (resp.output_text or "").strip()
-
