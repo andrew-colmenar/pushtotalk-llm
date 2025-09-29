@@ -9,11 +9,11 @@ def capture_fullscreen_b64(max_width: int = 16000, quality: int = 85) -> str:
     and returns a base64-encoded PNG string.
     """
     with mss.mss() as sct:
-        shot = sct.grab(sct.monitors[0])  # full primary screen
+        shot = sct.grab(sct.monitors[0])  
         png_bytes = mss.tools.to_png(shot.rgb, shot.size)
 
-    # Downsize to keep cost reasonable (optional but recommended)
     im = Image.open(io.BytesIO(png_bytes))
+    # Uhhh downsize for tokens 
     if im.width > max_width:
         new_h = int(im.height * (max_width / im.width))
         im = im.resize((max_width, new_h), Image.LANCZOS)
