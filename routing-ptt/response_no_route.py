@@ -93,20 +93,31 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     SESSION_ID = "default"
-    q = sys.argv[1] if len(sys.argv) > 1 else "What's new in AI today? Also summarize our recent context."
+    # Example multi-turn conversation to exercise memory + web_search + screenshot
+    turns = [
+        "What's new in AI today?",
+        "Summarize the key points in one paragraph.",
+        "Based on that, list 3 follow-up tasks for me.",
+        "Also, what do you see on my screen that might be relevant?",
+        "Please recap our ongoing plan from memory in 2 sentences.",
+    ]
 
-    answer = respond_always_enhanced(
-        session_id=SESSION_ID,
-        question=q,
-        include_web_search=True,
-        include_screenshot=True,
-        include_memory=True,
-    )
-    print("\nAnswer:\n", answer)
+    for i, user_msg in enumerate(turns, start=1):
+        print(f"\n[Turn {i}] User:\n{user_msg}")
 
-    # Store the new turn
-    memory.add_turn(SESSION_ID, "user", q)
-    memory.add_turn(SESSION_ID, "assistant", answer)
-    memory.recompute_summary(SESSION_ID)
+        # Generate assistant answer (this call also reads current memory)
+        answer = respond_always_enhanced(
+            session_id=SESSION_ID,
+            question=user_msg,
+            include_web_search=True,
+            include_screenshot=True,
+            include_memory=True,
+        )
+        print("\nAssistant:\n", answer)
+
+        # Persist turn pair and recompute summary so next turn has updated memory
+        memory.add_turn(SESSION_ID, "user", user_msg)
+        memory.add_turn(SESSION_ID, "assistant", answer)
+        memory.recompute_summary(SESSION_ID)
 
 
