@@ -32,49 +32,36 @@ def respond_always_enhanced(
     """
     system_prompt = (
         "You are a voice-based assistant.\n"
-        "Conversational history is stored in [MEMORY] and a screenshot of the user's screen at time of question is provided. You may also use web search to find relevant information.\n"
+        "Conversational history is stored under [MEMORY] section and a screenshot of the user's screen at time of question is provided. You may also use web search to find relevant information.\n"
         "Be concise, avoid long responses unless a longer narrative is needed.\n"
-        "Respond in a TTS-friendly way: Avoid filler, emojis, and heavy markdown,\n"
-        "Can use brief bullet points or numbered steps, and minimal formatting."
+        "Respond in a TTS-friendly way: Avoid filler, emojis, bold text, links, and markdown with minimal formatting"
     )
 
 
-    user_text_parts = [question]
-
+    #user_text_parts = [question]
 
     #memory_text: Optional[str] = None
 
-    if include_memory:
-        #try:
-            # Ensure memory block is up to date and fetch compact window
-        #     memory.recompute_summary(session_id)
-        #     memory_text = memory.get_compact_memory(session_id, max_chars=4000)
-        #     if memory_text:
-        #         user_text_parts.append("\n\n[MEMORY]\n" + memory_text)
-        #         logger.info(f"Added memory context ({len(memory_text)} chars)")
-        # except Exception as e:
-        #     logger.error(f"Failed to compute or fetch memory: {e}")
-
-        try:
-            if memory_text is None:
-                memory_text = memory.get_compact_memory(session_id, max_chars=40000)
-            if memory_text:
-                user_text_parts.append("\n\n[MEMORY]\n" + memory_text)
-                logger.info(f"Added memory context ({len(memory_text)} chars)")
-        except Exception as e:
-            logger.error(f"Failed to fetch memory: {e}")
-
-    input_user_content = [{"type": "input_text", "text": "\n".join(user_text_parts)}]
-
+    input_user_content = [{"type": "input_text", "text": question}]
 
     if include_screenshot:
         try:
             b64 = capture_fullscreen_b64()
             data_url = f"data:image/png;base64,{b64}"
             input_user_content.append({"type": "input_image", "image_url": data_url})
-            logger.info("Screenshot captured and appended to input content")
+            logger.info("Screenshot captured and appended")
         except Exception as e:
-            logger.error(f"Failed to capture screenshot: {e}")
+            logger.error(f"Screenshot skipped: {e}")
+
+    if include_memory:
+        try:
+            if memory_text is None:
+                memory_text = memory.get_compact_memory(session_id, max_chars=40000)
+            if memory_text:
+                input_user_content.append({"type": "input_text", "text": "[MEMORY]\n" + memory_text})
+                logger.info(f"Added memory context ({len(memory_text)} chars)")
+        except Exception as e:
+            logger.error(f"Failed to fetch memory: {e}")
 
     tools = []
     tool_choice = "none"
@@ -134,6 +121,10 @@ if __name__ == "__main__":
         # Persist turn pair and recompute summary so next turn has updated memory
         memory.add_turn(SESSION_ID, "user", user_msg)
         memory.add_turn(SESSION_ID, "assistant", answer)
-        memory.recompute_summary(SESSION_ID)
+        if i % 4 == 0:
+            memory.recompute_summary(SESSION_ID)
+
+        print("\n[Next-call MEMORY] (len:", len(memory.get_compact_memory(SESSION_ID, max_chars=40000)), ")")
+        print(memory.get_compact_memory(SESSION_ID, max_chars=40000))
 
 
