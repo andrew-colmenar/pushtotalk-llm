@@ -3,9 +3,9 @@
 import os, time
 from memory import MemoryStore, LAST_N
 
-def print_state(step, store, session_id="demo", max_chars=700):
+def print_state(step, store, session_id="demo"):
     s = store.get(session_id)
-    compact = store.get_compact_memory(session_id, max_chars=max_chars)
+    compact = store.get_compact_memory(session_id, max_chars=8000)
     print(f"\n=== STEP {step} ===")
     print("[MEMORY BLOCK]:")
     print(s.memory_block if s.memory_block else "(none yet)")
@@ -48,5 +48,5 @@ if __name__ == "__main__":
             mem.recompute_summary(session_id)
         except Exception:
             pass
-        print_state(i, mem, session_id, max_chars=900)
+        print_state(i, mem, session_id)
         time.sleep(0.05)

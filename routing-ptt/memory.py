@@ -36,7 +36,7 @@ class SessionMemory:
 
     def _window_slice(self) -> List[Turn]:
         """The M turns immediately before the last N: [-(N+M) : -N]."""
-        total = len(self.turns)
+        total = len(self.turns) 
         if total < LAST_N + 1:
             return []
         start = max(0, total - (LAST_N + WINDOW_M))
@@ -45,19 +45,13 @@ class SessionMemory:
 
     def recompute_memory_block(self) -> None:
         """
-        Ask the model to produce a single plain-text block:
-
-        MEMORIES:
-        - <0–5 durable bullets for long-term use, strictly curated>
-
-        SUMMARY:
-        <ONE concise sentence (<= 30 words) contextualizing ONLY the window (M turns before last N)>
-
-        We store that whole block (no parsing) in self.memory_block.
+        Refine the existing memory block (MEMORIES + SUMMARY) using the
+        new window (M turns before last N). The model receives the current
+        block and updates it in-place: prune/add MEMORIES and revise SUMMARY.
         """
         window = self._window_slice()
         if not window:
-            self.memory_block = ""
+            # nothing to update; keep whatever we had
             return
 
         # Build the window text
@@ -67,20 +61,32 @@ class SessionMemory:
             lines.append(f"{who}: {t.text.strip()}")
         block = "\n".join(lines)
 
+        existing = (self.memory_block or "").strip()
+
         prompt = f"""You are maintaining conversation memory.
 
-Produce a plain text response in this structure:
+    You will receive:
+    1) CURRENT MEMORY STORE + SUMMARY (May be empty)
+    2) NEW CONVERSATION TO INCORPORATE
 
-MEMORIES:
-- (durable facts/rules/preferences explicitly stated or vital long term items)
-- (each bullet concise and precise)
+    Your job is to update the CURRENT MEMORY STORE + SUMMARY in the following format:
+    
+    Format:
 
-SUMMARY:
-<summary that contextualizes the block so we know the general direction/idea AND key steps/decisions>
-        
-WINDOW TO SUMMARIZE:
-{block}
-""".strip()
+    SUMMARY:
+    Summary that contextualizes the block so we know the recent general direction/idea, key steps, and current assistant thinking. 
+
+    MEMORIES:
+    - Only add if clearly long-term memory: explicit rules, hard preferences, identities, targets, vital constraints
+    - Do NOT include status updates, recent steps, stack traces, one-offs, or summaries
+    - Concise and precise bullets.
+
+    EXISTING MEMORY STORE + SUMMARY:
+    {existing if existing else "(none yet)"}
+
+    WINDOW TO INCORPORATE:
+    {block}
+    """.strip()
 
         resp = client.responses.create(
             model="gpt-4.1-mini",
@@ -92,13 +98,71 @@ WINDOW TO SUMMARIZE:
         # Tolerate accidental code fences
         if text.startswith("```"):
             text = text.strip("`").strip()
-            # if it starts with a language tag, drop the first line
             if "\n" in text:
                 first, rest = text.split("\n", 1)
                 if first.lower() in ("json", "txt", "text"):
                     text = rest.strip()
 
+        # Store the whole refined block as-is (we don't parse)
         self.memory_block = text
+
+
+#     def recompute_memory_block_old(self) -> None:
+#         """
+#         Ask the model to produce a single plain-text block:
+
+#         MEMORIES:
+#         - <0–5 durable bullets for long-term use, strictly curated>
+
+#         SUMMARY:
+#         <ONE concise sentence (<= 30 words) contextualizing ONLY the window (M turns before last N)>
+
+#         We store that whole block (no parsing) in self.memory_block.
+#         """
+#         window = self._window_slice()
+#         if not window:
+#             self.memory_block = ""
+#             return
+
+#         # Build the window text
+#         lines = []
+#         for t in window:
+#             who = "User" if t.role == "user" else "Assistant"
+#             lines.append(f"{who}: {t.text.strip()}")
+#         block = "\n".join(lines)
+
+#         prompt = f"""You are maintaining conversation memory.
+
+# Produce a plain text response in this structure:
+
+# MEMORIES:
+# - (durable facts/rules/preferences explicitly stated or vital long term items)
+# - (each bullet concise and precise)
+
+# SUMMARY:
+# <summary that contextualizes the block so we know the general direction/idea AND key steps/decisions>
+        
+# WINDOW TO SUMMARIZE:
+# {block}
+# """.strip()
+
+#         resp = client.responses.create(
+#             model="gpt-4.1-mini",
+#             input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+#             temperature=0.2,
+#         )
+
+#         text = (resp.output_text or "").strip()
+#         # Tolerate accidental code fences
+#         if text.startswith("```"):
+#             text = text.strip("`").strip()
+#             # if it starts with a language tag, drop the first line
+#             if "\n" in text:
+#                 first, rest = text.split("\n", 1)
+#                 if first.lower() in ("json", "txt", "text"):
+#                     text = rest.strip()
+
+#         self.memory_block = text
 
     def compact_text(self, max_chars: int = _MAX_CHARS) -> str:
         """
