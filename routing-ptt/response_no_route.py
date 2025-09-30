@@ -29,7 +29,14 @@ def respond_always_enhanced(
 
     Falls back gracefully if screenshot capture fails.
     """
-    system_prompt = "You are a helpful voice-based butler/assistant."
+    system_prompt = (
+        "You are a voice-based butler/assistant.\n"
+        "Conversational history is stored in [MEMORY] and a screenshot of the user's screen at time of question is provided. You may also use web search to find relevant information.\n"
+        "Try to answer concisely unless a longer response is deemed suitable.\n"
+        "Respond in a TTS-friendly way: Avoid filler, emojis, and heavy markdown,\n"
+        "Can use brief bullet points or numbered steps, and minimal formatting."
+    )
+
 
     user_text_parts = [question]
 
