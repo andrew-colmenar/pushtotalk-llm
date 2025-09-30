@@ -107,7 +107,7 @@ if __name__ == "__main__":
     # simple session id; swap for per-user/per-hotkey if you want
     SESSION_ID = "default"
 
-    q = "In my code what is my plan print statement doing?"
+    q = "What time is it in Bali indonesia and In my code what is my plan print statement doing?"
 
     # 1) plan which tools/context to include
     plan = plan_tools(q)
