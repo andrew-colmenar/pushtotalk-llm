@@ -18,6 +18,7 @@ def respond_always_enhanced(
     include_web_search: bool = True,
     include_screenshot: bool = True,
     include_memory: bool = True,
+    memory_text: Optional[str] = None,
     model: str = "gpt-4.1-mini",
     temperature: float = 0.3,
 ) -> str:
@@ -30,9 +31,9 @@ def respond_always_enhanced(
     Falls back gracefully if screenshot capture fails.
     """
     system_prompt = (
-        "You are a voice-based butler/assistant.\n"
+        "You are a voice-based assistant.\n"
         "Conversational history is stored in [MEMORY] and a screenshot of the user's screen at time of question is provided. You may also use web search to find relevant information.\n"
-        "Try to answer concisely unless a longer response is deemed suitable.\n"
+        "Be concise, avoid long responses unless a longer narrative is needed.\n"
         "Respond in a TTS-friendly way: Avoid filler, emojis, and heavy markdown,\n"
         "Can use brief bullet points or numbered steps, and minimal formatting."
     )
@@ -41,23 +42,31 @@ def respond_always_enhanced(
     user_text_parts = [question]
 
 
-    memory_text: Optional[str] = None
+    #memory_text: Optional[str] = None
+
     if include_memory:
-        try:
+        #try:
             # Ensure memory block is up to date and fetch compact window
-            memory.recompute_summary(session_id)
-            memory_text = memory.get_compact_memory(session_id, max_chars=4000)
+        #     memory.recompute_summary(session_id)
+        #     memory_text = memory.get_compact_memory(session_id, max_chars=4000)
+        #     if memory_text:
+        #         user_text_parts.append("\n\n[MEMORY]\n" + memory_text)
+        #         logger.info(f"Added memory context ({len(memory_text)} chars)")
+        # except Exception as e:
+        #     logger.error(f"Failed to compute or fetch memory: {e}")
+
+        try:
+            if memory_text is None:
+                memory_text = memory.get_compact_memory(session_id, max_chars=40000)
             if memory_text:
                 user_text_parts.append("\n\n[MEMORY]\n" + memory_text)
                 logger.info(f"Added memory context ({len(memory_text)} chars)")
         except Exception as e:
-            logger.error(f"Failed to compute or fetch memory: {e}")
+            logger.error(f"Failed to fetch memory: {e}")
+
+    input_user_content = [{"type": "input_text", "text": "\n".join(user_text_parts)}]
 
 
-    # Build input content for Responses API (after memory may have been appended)
-    input_user_content = [
-        {"type": "input_text", "text": "\n".join(user_text_parts)}
-    ]
     if include_screenshot:
         try:
             b64 = capture_fullscreen_b64()
