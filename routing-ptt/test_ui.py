@@ -1,11 +1,16 @@
 import os
 import sys
 import json
+import logging
 from typing import Dict, Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Ensure this file's directory is importable as a module root (directory name has a hyphen)
 CURRENT_DIR = os.path.dirname(__file__)
@@ -57,6 +62,7 @@ async def index() -> HTMLResponse:
     .user { background: #1f2937; }
     .assistant { background: #0ea5e9; color: #0b1120; }
     .sysline { opacity: 0.7; font-size: 12px; text-align: center; margin: 8px 0; }
+    .debug { background: #374151; border: 1px solid #4b5563; font-family: monospace; font-size: 11px; }
     #composer { display: flex; gap: 8px; padding: 12px; background: #111827; border-top: 1px solid #1f2937; }
     #input { flex: 1; background: #0f172a; color: #e5e7eb; border: 1px solid #1f2937; border-radius: 8px; padding: 10px 12px; }
     button { background: #22c55e; color: #052e16; border: none; border-radius: 8px; padding: 10px 14px; font-weight: 600; cursor: pointer; }
@@ -94,6 +100,14 @@ async def index() -> HTMLResponse:
       elMessages.scrollTop = elMessages.scrollHeight;
     }
 
+    function addDebug(data) {
+      const div = document.createElement('div');
+      div.className = 'msg debug';
+      div.textContent = 'DEBUG: ' + JSON.stringify(data, null, 2);
+      elMessages.appendChild(div);
+      elMessages.scrollTop = elMessages.scrollHeight;
+    }
+
     async function loadHistory() {
       try {
         const res = await fetch('/history');
@@ -122,6 +136,9 @@ async def index() -> HTMLResponse:
         const data = await res.json();
         if (res.ok) {
           addMsg('assistant', data.answer || '');
+          if (data.debug) {
+            addDebug(data.debug);
+          }
         } else {
           addSys('Error: ' + (data.error || res.status));
         }
@@ -151,41 +168,69 @@ async def history(session_id: str = "web") -> JSONResponse:
 @app.post("/chat")
 async def chat(req: Request) -> JSONResponse:
     if not os.getenv("OPENAI_API_KEY"):
+        logger.error("OPENAI_API_KEY is not set")
         return JSONResponse({"error": "OPENAI_API_KEY is not set"}, status_code=400)
 
     try:
         data = await req.json()
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to parse JSON request: {e}")
         data = {}
 
     message = (data.get("message") or "").strip()
     if not message:
+        logger.error("No message provided in request")
         return JSONResponse({"error": "message is required"}, status_code=400)
 
     session_id = _get_session_id(data)
+    logger.info(f"Processing chat request - Session: {session_id}, Message: '{message}'")
 
     try:
         # 1) Plan tools/context
+        logger.info("Step 1: Planning tools and context...")
         plan = plan_tools(message)
+        logger.info(f"Plan generated: {json.dumps(plan, indent=2)}")
 
         # 2) Recompute memory block and get compact memory if needed
+        logger.info("Step 2: Processing memory...")
         memory.recompute_summary(session_id)
         mem_text = memory.get_compact_memory(session_id, max_chars=4000) if plan.get("needs_memory") else ""
+        
+        if plan.get("needs_memory") and mem_text:
+            logger.info(f"Memory text length: {len(mem_text)} characters")
+            logger.info(f"Memory preview: {mem_text[:200]}...")
+        else:
+            logger.info("No memory text needed or available")
 
         # 3) Generate answer
+        logger.info("Step 3: Generating answer...")
+        logger.info(f"Sending to LLM - Question: '{message}'")
+        logger.info(f"Plan being used: {json.dumps(plan, indent=2)}")
+        if mem_text:
+            logger.info(f"Memory context: {mem_text[:500]}...")
+        
         answer = execute_plan(question=message, plan=plan, memory_text=mem_text)
+        logger.info(f"LLM response received: {answer[:200]}...")
 
         # 4) Record turn pair and refresh memory
+        logger.info("Step 4: Recording conversation turn...")
         memory.add_turn(session_id, "user", message)
         memory.add_turn(session_id, "assistant", answer)
         memory.recompute_summary(session_id)
 
+        logger.info("Chat request completed successfully")
         return JSONResponse({
             "session_id": session_id,
             "answer": answer,
             "plan": plan,
+            "debug": {
+                "memory_length": len(mem_text),
+                "memory_preview": mem_text[:200] if mem_text else None,
+                "plan_details": plan
+            }
         })
     except Exception as e:
+        logger.error(f"Error in chat processing: {str(e)}", exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 

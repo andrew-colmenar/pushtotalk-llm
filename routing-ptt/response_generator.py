@@ -1,5 +1,6 @@
 
 import os, json
+import logging
 from openai import OpenAI
 from plan_router import plan_tools
 from screenshot import capture_fullscreen_b64
@@ -8,6 +9,9 @@ from memory import MemoryStore
 
 memory = MemoryStore()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 def execute_plan(
@@ -20,36 +24,83 @@ def execute_plan(
     attach memory/screenshot/web_search if requested,
     and return the assistant's final answer.
     """
+    logger.info(f"execute_plan called with question: '{question}'")
+    logger.info(f"Plan: {json.dumps(plan, indent=2)}")
+    
     system_prompt = "You are a helpful voice-based butler/assistant."
 
-    # Build one user message with multiple content blocks
-    content = [{"type": "input_text", "text": question}]
+    # Build the user message content
+    user_content = question
 
     if plan.get("needs_memory") and memory_text:
-        content.append({"type": "input_text", "text": f"[MEMORY]\n{memory_text}"})
+        logger.info(f"Adding memory context ({len(memory_text)} chars)")
+        user_content += f"\n\n[MEMORY]\n{memory_text}"
 
+    # For images, we need to use the vision model and proper content format
     if plan.get("needs_image"):
-        b64 = capture_fullscreen_b64()
-        data_url = f"data:image/png;base64,{b64}"
-        content.append({
-            "type": "input_image",
-            "image_url": data_url,
-        })
+        logger.info("Capturing screenshot...")
+        try:
+            b64 = capture_fullscreen_b64()
+            data_url = f"data:image/png;base64,{b64}"
+            
+            # Use vision model for images
+            model = "gpt-4o-mini"
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user", 
+                    "content": [
+                        {"type": "text", "text": user_content},
+                        {"type": "image_url", "image_url": {"url": data_url}}
+                    ]
+                }
+            ]
+            logger.info("Screenshot captured and added to content")
+        except Exception as e:
+            logger.error(f"Failed to capture screenshot: {e}")
+            # Fall back to text-only
+            model = "gpt-4o-mini"
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ]
+    else:
+        # Text-only content
+        model = "gpt-4o-mini"
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ]
 
     tools = []
     if plan.get("needs_websearch"):
+        logger.info("Adding web search tool")
         tools.append({"type": "web_search"})
 
-    resp = client.responses.create(
-        model="gpt-4o-mini",
-        input=[
-            {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
-            {"role": "user", "content": content}
-        ],
-        tools=tools,
-        temperature=0.3,
-    )
-    return resp.output_text
+    # Log what we're sending to the LLM
+    logger.info(f"Sending to OpenAI API:")
+    logger.info(f"  Model: {model}")
+    logger.info(f"  System prompt: {system_prompt}")
+    logger.info(f"  User content: {user_content[:200]}...")
+    logger.info(f"  Has image: {plan.get('needs_image', False)}")
+    logger.info(f"  Tools: {tools if tools else 'None'}")
+    logger.info(f"  Temperature: 0.3")
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools if tools else None,
+            temperature=0.3,
+        )
+        
+        response_text = resp.choices[0].message.content
+        logger.info(f"OpenAI API response received: {response_text[:200]}...")
+        return response_text
+        
+    except Exception as e:
+        logger.error(f"OpenAI API call failed: {e}")
+        raise
 
 
 if __name__ == "__main__":
