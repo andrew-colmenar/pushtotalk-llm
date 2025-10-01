@@ -34,7 +34,7 @@ def respond_always_enhanced(
         "You are a voice-based assistant.\n"
         "Conversational history is stored under [MEMORY] section and a screenshot of the user's screen at time of question is provided. You may also use web search to find relevant information.\n"
         "Be concise, avoid long responses unless a longer narrative is needed.\n"
-        "Respond in a TTS-friendly way: Avoid filler, emojis, bold text, links, and markdown with minimal formatting"
+        "Respond in a TTS-friendly way: Avoid filler, emojis, bold text, markdown. Use minimal formatting and no links, if referncing a source just name the source site"
     )
 
 
@@ -69,11 +69,11 @@ def respond_always_enhanced(
         tools.append({"type": "web_search"})
         tool_choice = "auto"
 
-    logger.info("Sending to OpenAI Responses API")
-    logger.info(f"  Model: {model}")
-    logger.info(f"  Include memory: {include_memory}")
-    logger.info(f"  Include screenshot: {include_screenshot}")
-    logger.info(f"  Web search: {include_web_search}")
+    # logger.info("Sending to OpenAI Responses API")
+    # logger.info(f"  Model: {model}")
+    # logger.info(f"  Include memory: {include_memory}")
+    # logger.info(f"  Include screenshot: {include_screenshot}")
+    # logger.info(f"  Web search: {include_web_search}")
 
     resp = client.responses.create(
         model=model,
@@ -87,8 +87,73 @@ def respond_always_enhanced(
     )
 
     text = (resp.output_text or "").strip()
-    logger.info(f"OpenAI response: {text[:200]}...")
+    # logger.info(f"OpenAI response: {text[:200]}...")
+
     return text
+
+# if __name__ == "__main__":
+#     import sys
+#     logging.basicConfig(level=logging.INFO)
+
+#     SESSION_ID = "default"
+#     turns = [
+#         "What's new in AI today?",
+#         "Summarize the key points in one paragraph.",
+#         "Based on that, list 3 follow-up tasks for me.",
+#         "Also, what do you see on my screen that might be relevant?",
+#         "Please recap our ongoing plan from memory in 2 sentences.",
+#     ]
+
+#     for i, user_msg in enumerate(turns, start=1):
+#         print(f"\n[Turn {i}] User:\n{user_msg}")
+
+#         # Build memory block for debugging
+#         mem_text = memory.get_compact_memory(SESSION_ID, max_chars=4000)
+
+#         # Human-readable view
+#         print("\n[Context Sent to LLM]")
+#         if mem_text:
+#             print("--- MEMORY BLOCK ---")
+#             print(mem_text)
+#         print("--- QUESTION ---")
+#         print(user_msg)
+
+#         # Exact payload view
+#         system_prompt = "You are a voice-based assistant..."  # keep your real system prompt here
+#         input_user_content = []
+#         if mem_text:
+#             input_user_content.append({"type": "input_text", "text": "[MEMORY]\n" + mem_text})
+#         input_user_content.append({"type": "input_text", "text": user_msg})
+
+#         payload = [
+#             {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+#             {"role": "user", "content": input_user_content},
+#         ]
+#         print("\n[Exact API Payload Sent to OpenAI]")
+#         print(json.dumps(payload, indent=2)[:2000])  # truncate if too long
+
+#         # Now actually call your generator
+#         answer = respond_always_enhanced(
+#             session_id=SESSION_ID,
+#             question=user_msg,
+#             include_web_search=True,
+#             include_screenshot=True,
+#             include_memory=True,
+#         )
+#         print("\nAssistant:\n", answer)
+
+#         # Update memory
+#         memory.add_turn(SESSION_ID, "user", user_msg)
+#         memory.add_turn(SESSION_ID, "assistant", answer)
+#         if i % 4 == 0:
+#             memory.recompute_summary(SESSION_ID)
+
+#         print("\n[Next-call MEMORY] (len:", len(memory.get_compact_memory(SESSION_ID, max_chars=40000)), ")")
+#         print(memory.get_compact_memory(SESSION_ID, max_chars=40000))
+
+
+
+
 
 
 if __name__ == "__main__":
@@ -103,10 +168,27 @@ if __name__ == "__main__":
         "Based on that, list 3 follow-up tasks for me.",
         "Also, what do you see on my screen that might be relevant?",
         "Please recap our ongoing plan from memory in 2 sentences.",
+        "Add two constraints we should always remember going forward.",
+        "Now give me one-sentence recap of our progress so far.",
+        "Where was I last week?",
+        "Who is Lebron's dad",
+        "Tell me a story about Drew Colmenar"
     ]
 
     for i, user_msg in enumerate(turns, start=1):
-        print(f"\n[Turn {i}] User:\n{user_msg}")
+        print("=" * 80)
+        print(f"[Turn {i}] User:\n{user_msg}")
+
+        # Build the compact memory that would be attached
+        mem_text = memory.get_compact_memory(SESSION_ID, max_chars=4000)
+
+        # Show what we’re about to send to the LLM
+        print("\n[Context Sent to LLM]")
+        if mem_text:
+            print("--- MEMORY BLOCK ---")
+            print(mem_text)
+        print("--- QUESTION ---")
+        print(user_msg)
 
         # Generate assistant answer (this call also reads current memory)
         answer = respond_always_enhanced(
@@ -116,15 +198,18 @@ if __name__ == "__main__":
             include_screenshot=True,
             include_memory=True,
         )
-        print("\nAssistant:\n", answer)
+        print("\n[Assistant Response]")
+        print(answer)
 
-        # Persist turn pair and recompute summary so next turn has updated memory
+        # Persist turn pair
         memory.add_turn(SESSION_ID, "user", user_msg)
         memory.add_turn(SESSION_ID, "assistant", answer)
+
+        # Recompute summary every 4 turns
         if i % 4 == 0:
+            print("\n(Recomputing memory summary at turn", i, ")")
             memory.recompute_summary(SESSION_ID)
 
-        print("\n[Next-call MEMORY] (len:", len(memory.get_compact_memory(SESSION_ID, max_chars=40000)), ")")
-        print(memory.get_compact_memory(SESSION_ID, max_chars=40000))
-
-
+        # Show updated memory that will be available for the next turn
+        print("\n[Next-call MEMORY] (len:", len(memory.get_compact_memory(SESSION_ID)), ")")
+        print(memory.get_compact_memory(SESSION_ID))

@@ -74,17 +74,18 @@ class SessionMemory:
     Format:
 
     SUMMARY:
-    Summary that contextualizes the block so we know the recent general direction/idea, key steps, and current assistant thinking. 
+    A short summary that contextualizes specifically the recent exchange so we know the recent direction/idea, key steps, and current assistant thinking. Also another sentence incorporating previous summaries in a condensed manner to keep general knowledge.
 
     MEMORIES:
-    - Only add if clearly long-term memory: explicit rules, hard preferences, identities, targets, vital constraints
-    - Do NOT include status updates, recent steps, stack traces, one-offs, or summaries
-    - Concise and precise bullets.
+    - Keep only items explicitly stated or clearly confirmed by the USER: explicit rules, hard preferences, identity, long-term constraints
+    - Keep only items that will remain true or useful across many future turns.
+    - Do NOT include status updates, recent steps, stack traces, one-offs, summaries, assistant behavior, logs
+    - MEMORIES must be concise fact-style bullets only: exact informative details, one fact per bullet, no full sentences, no explanations, no explanation/reasoning
 
     EXISTING MEMORY STORE + SUMMARY:
     {existing if existing else "(none yet)"}
 
-    WINDOW TO INCORPORATE:
+    RECENT EXCHANGE TO INCORPORATE:
     {block}
     """.strip()
 
@@ -176,7 +177,8 @@ class SessionMemory:
 
         recent = list(self.turns)[-LAST_N:]
         if recent:
-            parts.append("")  # blank line before verbatim
+            
+            parts.append("[RECENT EXCHANGE]")  # blank line before verbatim
             for t in recent:
                 prefix = "User:" if t.role == "user" else "Assistant:"
                 parts.append(f"{prefix} {t.text.strip()}")
