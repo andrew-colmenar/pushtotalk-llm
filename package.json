@@ -1,0 +1,13 @@
+{
+  "name": "pushtotalk-llm",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "predev": "npm --prefix routing-ptt/web install",
+    "dev": "npm --prefix routing-ptt/web run dev",
+    "build": "npm --prefix routing-ptt/web run build",
+    "preview": "npm --prefix routing-ptt/web run preview"
+  }
+}
+
+

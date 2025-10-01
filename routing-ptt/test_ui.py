@@ -1,30 +1,35 @@
 import os
 import sys
 import json
-import logging
 from typing import Dict, Any
+
+"""
+How to run
+Backend:
+Set env: export OPENAI_API_KEY=sk-...
+Start API: python routing-ptt/test_ui.py
+Frontend:
+cd routing-ptt/web
+npm install
+npm run dev
+Visit: http://localhost:5173
+"""
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from fastapi.responses import JSONResponse, HTMLResponse
 
 # Ensure this file's directory is importable as a module root (directory name has a hyphen)
 CURRENT_DIR = os.path.dirname(__file__)
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
-from plan_router import plan_tools
-from response_generator import execute_plan
 from memory import MemoryStore
+from response_no_route import respond_always_enhanced
 
 
-app = FastAPI(title="PTT Chat UI")
+app = FastAPI(title="PTT Chat (Minimal)")
 
-# Allow local dev origins (including future npm dev server if wanted)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,119 +48,32 @@ def _get_session_id(data: Dict[str, Any]) -> str:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> HTMLResponse:
-    # Minimal single-file UI
-    html = """
+async def root() -> HTMLResponse:
+    return HTMLResponse(
+        """
 <!doctype html>
 <html>
-<head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>PTT Chat UI</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #0b1120; color: #e5e7eb; }
-    header { padding: 12px 16px; background: #111827; border-bottom: 1px solid #1f2937; }
-    header h1 { margin: 0; font-size: 16px; font-weight: 600; }
-    #app { display: flex; flex-direction: column; height: 100vh; }
-    #messages { flex: 1; overflow: auto; padding: 16px; }
-    .msg { max-width: 800px; margin: 0 auto 12px auto; padding: 12px 14px; border-radius: 10px; white-space: pre-wrap; line-height: 1.35; }
-    .user { background: #1f2937; }
-    .assistant { background: #0ea5e9; color: #0b1120; }
-    .sysline { opacity: 0.7; font-size: 12px; text-align: center; margin: 8px 0; }
-    .debug { background: #374151; border: 1px solid #4b5563; font-family: monospace; font-size: 11px; }
-    #composer { display: flex; gap: 8px; padding: 12px; background: #111827; border-top: 1px solid #1f2937; }
-    #input { flex: 1; background: #0f172a; color: #e5e7eb; border: 1px solid #1f2937; border-radius: 8px; padding: 10px 12px; }
-    button { background: #22c55e; color: #052e16; border: none; border-radius: 8px; padding: 10px 14px; font-weight: 600; cursor: pointer; }
-    button[disabled] { opacity: 0.6; cursor: not-allowed; }
-  </style>
-</head>
-<body>
-  <div id=\"app\">
-    <header><h1>PTT Chat UI</h1></header>
-    <div id=\"messages\"></div>
-    <form id=\"composer\">
-      <input id=\"input\" name=\"message\" placeholder=\"Type a message...\" autocomplete=\"off\" />
-      <button id=\"send\" type=\"submit\">Send</button>
-    </form>
-  </div>
-  <script>
-    const elMessages = document.getElementById('messages');
-    const elForm = document.getElementById('composer');
-    const elInput = document.getElementById('input');
-    const elSend = document.getElementById('send');
-
-    function addMsg(role, text) {
-      const div = document.createElement('div');
-      div.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
-      div.textContent = text;
-      elMessages.appendChild(div);
-      elMessages.scrollTop = elMessages.scrollHeight;
-    }
-
-    function addSys(text) {
-      const div = document.createElement('div');
-      div.className = 'sysline';
-      div.textContent = text;
-      elMessages.appendChild(div);
-      elMessages.scrollTop = elMessages.scrollHeight;
-    }
-
-    function addDebug(data) {
-      const div = document.createElement('div');
-      div.className = 'msg debug';
-      div.textContent = 'DEBUG: ' + JSON.stringify(data, null, 2);
-      elMessages.appendChild(div);
-      elMessages.scrollTop = elMessages.scrollHeight;
-    }
-
-    async function loadHistory() {
-      try {
-        const res = await fetch('/history');
-        if (!res.ok) return;
-        const data = await res.json();
-        elMessages.innerHTML = '';
-        (data.turns || []).forEach(t => addMsg(t.role, t.text));
-      } catch (e) {
-        console.error(e);
-      }
-    }
-
-    elForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const message = elInput.value.trim();
-      if (!message) return;
-      addMsg('user', message);
-      elInput.value = '';
-      elInput.disabled = true; elSend.disabled = true;
-      try {
-        const res = await fetch('/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message })
-        });
-        const data = await res.json();
-        if (res.ok) {
-          addMsg('assistant', data.answer || '');
-          if (data.debug) {
-            addDebug(data.debug);
-          }
-        } else {
-          addSys('Error: ' + (data.error || res.status));
-        }
-      } catch (err) {
-        addSys('Network error');
-        console.error(err);
-      } finally {
-        elInput.disabled = false; elSend.disabled = false; elInput.focus();
-      }
-    });
-
-    loadHistory();
-  </script>
-</body>
-</html>
-    """
-    return HTMLResponse(content=html)
+  <head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>PTT Backend</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+      code { background:#f3f4f6; padding:2px 4px; border-radius:4px; }
+    </style>
+  </head>
+  <body>
+    <h1>PTT Backend is running</h1>
+    <p>Open the Vite UI at <a href=\"http://localhost:5173\">http://localhost:5173</a>.</p>
+    <p>API endpoints:</p>
+    <ul>
+      <li><code>GET /history</code></li>
+      <li><code>POST /chat</code></li>
+    </ul>
+  </body>
+  </html>
+        """
+    )
 
 
 @app.get("/history")
@@ -168,70 +86,83 @@ async def history(session_id: str = "web") -> JSONResponse:
 @app.post("/chat")
 async def chat(req: Request) -> JSONResponse:
     if not os.getenv("OPENAI_API_KEY"):
-        logger.error("OPENAI_API_KEY is not set")
         return JSONResponse({"error": "OPENAI_API_KEY is not set"}, status_code=400)
 
     try:
         data = await req.json()
-    except Exception as e:
-        logger.error(f"Failed to parse JSON request: {e}")
+    except Exception:
         data = {}
 
     message = (data.get("message") or "").strip()
     if not message:
-        logger.error("No message provided in request")
         return JSONResponse({"error": "message is required"}, status_code=400)
 
     session_id = _get_session_id(data)
-    logger.info(f"Processing chat request - Session: {session_id}, Message: '{message}'")
 
-    try:
-        # 1) Plan tools/context
-        logger.info("Step 1: Planning tools and context...")
-        plan = plan_tools(message)
-        logger.info(f"Plan generated: {json.dumps(plan, indent=2)}")
+    # Recompute memory and build the same payload style we send to the LLM
+    memory.recompute_summary(session_id)
+    mem_text = memory.get_compact_memory(session_id, max_chars=4000)
 
-        # 2) Recompute memory block and get compact memory if needed
-        logger.info("Step 2: Processing memory...")
-        memory.recompute_summary(session_id)
-        mem_text = memory.get_compact_memory(session_id, max_chars=4000) if plan.get("needs_memory") else ""
-        
-        if plan.get("needs_memory") and mem_text:
-            logger.info(f"Memory text length: {len(mem_text)} characters")
-            logger.info(f"Memory preview: {mem_text[:200]}...")
-        else:
-            logger.info("No memory text needed or available")
+    # These flags keep the demo simple and deterministic
+    include_web_search = False
+    include_screenshot = False
+    include_memory = True
 
-        # 3) Generate answer
-        logger.info("Step 3: Generating answer...")
-        logger.info(f"Sending to LLM - Question: '{message}'")
-        logger.info(f"Plan being used: {json.dumps(plan, indent=2)}")
-        if mem_text:
-            logger.info(f"Memory context: {mem_text[:500]}...")
-        
-        answer = execute_plan(question=message, plan=plan, memory_text=mem_text)
-        logger.info(f"LLM response received: {answer[:200]}...")
+    system_prompt = (
+        "You are a voice-based assistant with resources to answer the user's question to the best of your ability.\n"
+        "Resources: Conversational history is stored under [CONVERSATION HISTORY] section and a screenshot of the user's screen at time of question is provided. You may also use web search to find relevant information.\n"
+        "Be concise, avoid long responses unless a longer narrative is needed.\n"
+        "IMPORTANT: Respond in a TTS-friendly way: Avoid filler, emojis, bold text, markdown. Use minimal formatting and no links, if referncing a source just name the site.\n"
+        "IMPORTANT: When using web search results: Provide only the direct answer concisely as possible. Do not dump raw articles or long summaries. Reformat all outputs for TTS.\n"
+    )
 
-        # 4) Record turn pair and refresh memory
-        logger.info("Step 4: Recording conversation turn...")
-        memory.add_turn(session_id, "user", message)
-        memory.add_turn(session_id, "assistant", answer)
-        memory.recompute_summary(session_id)
-
-        logger.info("Chat request completed successfully")
-        return JSONResponse({
-            "session_id": session_id,
-            "answer": answer,
-            "plan": plan,
-            "debug": {
-                "memory_length": len(mem_text),
-                "memory_preview": mem_text[:200] if mem_text else None,
-                "plan_details": plan
-            }
+    input_user_content = [
+        {"type": "input_text", "text": "USER MESSAGE NEEDING RESPONSE: " + message}
+    ]
+    if include_memory and mem_text:
+        input_user_content.append({
+            "type": "input_text",
+            "text": "[CONVERSATION HISTORY]\n" + mem_text
         })
-    except Exception as e:
-        logger.error(f"Error in chat processing: {str(e)}", exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+
+    payload = [
+        {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+        {"role": "user", "content": input_user_content},
+    ]
+
+    # Clean text view for the UI
+    payload_text_parts = [
+        "[SYSTEM]",
+        system_prompt.strip(),
+        "",
+        "[USER]",
+        ("[CONVERSATION HISTORY]\n" + mem_text) if (include_memory and mem_text) else "",
+        "QUESTION:",
+        message,
+    ]
+    payload_text = "\n".join([p for p in payload_text_parts if p]).strip()
+
+    # Generate the assistant answer using the same underlying function
+    answer = respond_always_enhanced(
+        session_id=session_id,
+        question=message,
+        include_web_search=include_web_search,
+        include_screenshot=include_screenshot,
+        include_memory=include_memory,
+        memory_text=mem_text,
+    )
+
+    # Record turns and refresh memory
+    memory.add_turn(session_id, "user", message)
+    memory.add_turn(session_id, "assistant", answer)
+    memory.recompute_summary(session_id)
+
+    return JSONResponse({
+        "session_id": session_id,
+        "answer": answer,
+        "payload": payload,
+        "payload_text": payload_text,
+    })
 
 
 if __name__ == "__main__":
