@@ -79,7 +79,7 @@ class SessionMemory:
     MEMORIES:
     - Keep only items explicitly stated or clearly confirmed by the USER: explicit rules, hard preferences, identity, long-term constraints
     - Keep only items that will remain true or useful across many future turns.
-    - Do NOT include status updates, recent steps, stack traces, one-offs, summaries, assistant behavior, logs
+    - Do NOT include status updates, recent steps, stack traces, one-offs, summaries, assistant responses, logs
     - MEMORIES must be concise fact-style bullets only: exact informative details, one fact per bullet, no full sentences, no explanations, no explanation/reasoning
 
     EXISTING MEMORY STORE + SUMMARY:

@@ -19,7 +19,7 @@ def respond_always_enhanced(
     include_screenshot: bool = True,
     include_memory: bool = True,
     memory_text: Optional[str] = None,
-    model: str = "gpt-4.1-mini",
+    model: str = "gpt-4o-mini",
     temperature: float = 0.3,
 ) -> str:
     """
@@ -31,10 +31,11 @@ def respond_always_enhanced(
     Falls back gracefully if screenshot capture fails.
     """
     system_prompt = (
-        "You are a voice-based assistant.\n"
-        "Conversational history is stored under [MEMORY] section and a screenshot of the user's screen at time of question is provided. You may also use web search to find relevant information.\n"
+        "You are a voice-based assistant with resources to answer the user's question to the best of your ability.\n"
+        "Resources: Conversational history is stored under [CONVERSATION HISTORY] section and a screenshot of the user's screen at time of question is provided. You may also use web search to find relevant information.\n"
         "Be concise, avoid long responses unless a longer narrative is needed.\n"
-        "Respond in a TTS-friendly way: Avoid filler, emojis, bold text, markdown. Use minimal formatting and no links, if referncing a source just name the source site"
+        "IMPORTANT: Respond in a TTS-friendly way: Avoid filler, emojis, bold text, markdown. Use minimal formatting and no links, if referncing a source just name the site.\n"
+        "IMPORTANT:When using web search results: Provide only the direct answer concisely as possible. Do not dump raw articles or long summaries. Reformat all outputs for TTS.\n"
     )
 
 
@@ -42,7 +43,7 @@ def respond_always_enhanced(
 
     #memory_text: Optional[str] = None
 
-    input_user_content = [{"type": "input_text", "text": question}]
+    input_user_content = [{"type": "input_text", "text": "USER MESSAGE NEEDING RESPONSE: " + question}]
 
     if include_screenshot:
         try:
@@ -58,7 +59,7 @@ def respond_always_enhanced(
             if memory_text is None:
                 memory_text = memory.get_compact_memory(session_id, max_chars=40000)
             if memory_text:
-                input_user_content.append({"type": "input_text", "text": "[MEMORY]\n" + memory_text})
+                input_user_content.append({"type": "input_text", "text": "[CONVERSATION HISTORY]\n" + memory_text})
                 logger.info(f"Added memory context ({len(memory_text)} chars)")
         except Exception as e:
             logger.error(f"Failed to fetch memory: {e}")
@@ -89,6 +90,7 @@ def respond_always_enhanced(
     text = (resp.output_text or "").strip()
     # logger.info(f"OpenAI response: {text[:200]}...")
 
+    #print(input_user_content)
     return text
 
 # if __name__ == "__main__":
@@ -183,12 +185,12 @@ if __name__ == "__main__":
         mem_text = memory.get_compact_memory(SESSION_ID, max_chars=4000)
 
         # Show what we’re about to send to the LLM
-        print("\n[Context Sent to LLM]")
-        if mem_text:
-            print("--- MEMORY BLOCK ---")
-            print(mem_text)
-        print("--- QUESTION ---")
-        print(user_msg)
+        # print("\n[Context Sent to LLM]")
+        # if mem_text:
+        #     print("--- MEMORY BLOCK ---")
+        #     print(mem_text)
+        # print("--- QUESTION ---")
+        # print(user_msg)
 
         # Generate assistant answer (this call also reads current memory)
         answer = respond_always_enhanced(
@@ -211,5 +213,6 @@ if __name__ == "__main__":
             memory.recompute_summary(SESSION_ID)
 
         # Show updated memory that will be available for the next turn
-        print("\n[Next-call MEMORY] (len:", len(memory.get_compact_memory(SESSION_ID)), ")")
-        print(memory.get_compact_memory(SESSION_ID))
+        # print("\n[Next-call MEMORY] (len:", len(memory.get_compact_memory(SESSION_ID)), ")")
+        # print(memory.get_compact_memory(SESSION_ID))
+
